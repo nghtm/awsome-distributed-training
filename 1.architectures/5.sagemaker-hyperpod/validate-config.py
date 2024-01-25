@@ -40,30 +40,75 @@ def validate_sg(ec2_client, cluster_config):
 
         ingress = response.get('SecurityGroups')[0].get('IpPermissions')
         egress = response.get('SecurityGroups')[0].get('IpPermissionsEgress')
-
         
         for rule in ingress:
             if rule.get('IpProtocol') == '-1':
-                user_id_group_pairs = rule.get('UserIdGroupPairs')[0]
-                if not ('GroupId' in user_id_group_pairs or security_group == user_id_group_pairs.get('GroupId')):
+                user_id_group_pairs = rule.get('UserIdGroupPairs')
+                if not user_id_group_pairs:
                     print(f"❌ No EFA egress rule found in security group {security_group} ...")
                     return False
                 else:
-                    print(f"✔️  Validated security group {security_group} ingress rules ...")
+                    if not ('GroupId' in user_id_group_pairs[0] or security_group == user_id_group_pairs[0].get('GroupId')):
+                        print(f"❌ No EFA egress rule found in security group {security_group} ...")
+                        return False
+                    else:
+                        print(f"✔️  Validated security group {security_group} ingress rules ...")
 
         for rule in egress:
             if rule.get('IpProtocol') == '-1':
-                user_id_group_pairs = rule.get('UserIdGroupPairs')[0]
-                if not ('GroupId' in user_id_group_pairs or security_group == user_id_group_pairs.get('GroupId')):
+                user_id_group_pairs = rule.get('UserIdGroupPairs')
+                if not user_id_group_pairs:
                     print(f"❌ No EFA egress rule found in security group {security_group} ...")
                     return False
                 else:
-                    print(f"✔️  Validated security group {security_group} egress rules ...")
+                    if not ('GroupId' in user_id_group_pairs[0] or security_group == user_id_group_pairs[0].get('GroupId')):
+                        print(f"❌ No EFA egress rule found in security group {security_group} ...")
+                        return False
+                    else:
+                        print(f"✔️  Validated security group {security_group} egress rules ...")
     else:
         print("⭕️ No security group found in cluster_config.json ... skipping check.")
     
     return True
 
+# Simulates the provided role to make sure it has access to the bucket
+# with lifecycle scripts.
+def validate_s3_bucket_access(cluster_config):
+    policy_source_arn = cluster_config.get('InstanceGroups')[0].get('ExecutionRole')
+    action = "s3:GetObject"
+    bucket = cluster_config.get('InstanceGroups')[0].get('LifeCycleConfig').get('SourceS3Uri')
+    bucket = bucket.split('//')[1]
+    bucket_arn = f"arn:aws:s3:::{bucket}"
+    account_id = boto3.client('sts').get_caller_identity().get('Account')
+
+    iam_client = boto3.client('iam')
+    iam = iam_client.simulate_principal_policy(PolicySourceArn=policy_source_arn,
+                                               ActionNames=[action],
+                                               ResourceArns=[bucket_arn],
+                                               ContextEntries=[
+                                                {
+                                                    'ContextKeyName': 'aws:PrincipalAccount',
+                                                    'ContextKeyValues': [
+                                                        account_id,
+                                                    ],
+                                                    'ContextKeyType': 'string'
+                                                },
+                                                {
+                                                    'ContextKeyName': 'aws:ResourceAccount',
+                                                    'ContextKeyValues': [
+                                                        account_id,
+                                                    ],
+                                                    'ContextKeyType': 'string'
+                                                },
+                                                ],
+    )
+
+    if iam.get('EvaluationResults')[0].get('EvalDecision') == 'allowed':
+        print(f"✔️  Validated policy {policy_source_arn} has access to bucket s3://{bucket} ...")
+        return True
+    else:
+        print(f"❌ Failed policy validation {policy_source_arn} does not give access to bucket s3://{bucket} ... ")
+        return False
 
 def main():
     parser = argparse.ArgumentParser(description="Validate cluster config.")
@@ -87,6 +132,9 @@ def main():
 
     # Validate Security Group
     valid = validate_sg(ec2_client, cluster_config) and valid
+
+    # Validate IAM Role for S3 Bucket access
+    valid = validate_s3_bucket_access(cluster_config) and valid
 
     if valid:
         # All good!
